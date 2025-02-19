@@ -1,0 +1,545 @@
+# Prod Engineer Challenge
+
+```elixir
+Mix.install([
+  {:tesla, "~> 1.14"},
+  {:jason, "~> 1.4"},
+  {:bandit, "~> 1.6"},
+  {:uuid, "~> 1.1"}
+])
+```
+
+## Intro
+
+**Hello** 👋
+
+Thanks for wanting to take this challenge as part of our interview process! The idea behind this is to get a sense of how you go about solving particular problems one would encounter when starting out at Turn as an Elixir software engineer.
+
+This isn't necessarily reflective of the work one would end up doing but does help us have a conversation about how you go about approaching work!
+
+### The situation
+
+We run a platform for powering life improving conversations at Turn.io. This is being used by hundreds of impact organisations, social enterprises, and ministries of health in emerging markets.
+
+We care a lot about building a **great** product that helps teams maximise their impact. In practice this means that we try to do a production release at least once a day. However in doing so we also need to guarantee that we do high quality releases as releases causing instability would directly, and possibly negatively, impact the health and lives of those depending on the kinds of services our customers host.
+
+One way to do that is to create a setup that allows us to run regular smoke tests against any of our live environments to confirm that the release is working as expected and performing within expectated latency percentiles.
+
+### Turn Platform Overview
+
+Turn.io powers conversational services primarily over WhatsApp. Key concepts include:
+
+* **Channels**: Communication pathways (WhatsApp, SMS, etc.)
+* **Journeys**: Conversational flows defined with our DSL (Domain Specific Language)
+* **Cards**: Individual interaction steps in a Journey
+* **Triggers**: Conditions that start a Journey
+
+Understanding these concepts will help you design an effective monitoring solution.
+
+### Setting up for the Challenge
+
+We are going to write an Elixir service that:
+
+1. Defines a service using the Journeys DSL
+2. Touches important parts of Turn we want to see regularly tested (triggers, messages, button presses, etc)
+3. Uploads the Journey to Turn with the Journeys API
+4. Triggers the Journey using the Channels API
+5. Logs the responses received via a Bandit HTTP server
+
+### Checkpoints
+
+As you work through the challenge, you should be able to:
+
+1. ✅ Successfully set up the HTTP server and expose it through Pinggy
+2. ✅ Create a Channel and Journey in Turn
+3. ✅ Send a message and receive the "hello world" response
+4. ✅ Implement the button interaction flow
+5. 🏁 Extend the solution to handle the requirements in "Your Challenge!"
+
+### Troubleshooting
+
+If you experience issues with Pinggy.io, you can alternatively:
+
+* Use ngrok as an alternative tunneling service
+* Set up a minimal VPS with a public IP
+* Or, if neither is possible, modify the code to log expected HTTP requests/responses locally and explain how you would implement the real integration
+
+### The Journeys DSL
+
+The [Journeys DSL](https://whatsapp.turn.io/docs/build/journeys_overview) is an Elixir-like language we use to describe the kinds of conversational services our customers want to host. We host and run this on our infrastructure, below is an example:
+
+```elixir
+ast =
+  quote do
+    card MyCard do
+      text("hello world!")
+    end
+  end
+```
+
+Notice we are using Elixir's `quote/1` function to convert the DSL into an Elixir AST. This is useful because inside this Livebook we can then use the Elixir code formatter but also convert it back to a String again with `Macro.to_string/1`.
+
+In production we use a similar approach. We generate the AST and then cross compile it into a format called the Flow Interop Specification; an open JSON format for conversational systems: https://flowinterop.org/ which is then run using our open-source [FlowRunner](https://github.com/turnhub/flow_runner)
+
+```elixir
+formatted_code =
+  ast
+  |> Code.quoted_to_algebra(
+    escape: false,
+    columns: true,
+    locals_without_parens: [card: :*, stack: :*]
+  )
+  |> Inspect.Algebra.format(96)
+  |> IO.iodata_to_binary()
+
+IO.puts(formatted_code)
+```
+
+### The Channels API
+
+By default Turn primarily is focussed on the WhatsApp Business API. We do this to maximise our impact, billions of people in emerging markets rely on WhatsApp for their personal and private communications.
+
+The [Channels API](https://whatsapp.turn.io/docs/api/channel_api) allows one to create a new channel for Turn.io, however the Channel API isn't linked to WhatsApp. It allows developers to connect their Turn.io account to a different communication channel.
+
+We will be using the Channel API for our implementation since we want to be testing Turn.io's performance, not WhatsApp's performance.
+
+To use the Channel API we need to set-up a publicly available HTTP server that Turn will send outbound messages to for delivery to the end user. In our scenario, we are the end-user, in production use cases the end user could be someone receiving messages over SMS, Signal, or Telegram as an example.
+
+We are going to be using [Bandit](https://github.com/mtrudel/bandit), to run our HTTP server, and to expose our server on the Internet we are going to be using https://pinggy.io/ which provides a very convenient SSH based service to provide tunneling services.
+
+Below is the scaffolding for the HTTP server run by [Bandit](https://github.com/mtrudel/bandit)
+
+```elixir
+defmodule Router do
+  use Plug.Router
+  plug(Plug.Logger)
+  plug(:match)
+  plug(:dispatch)
+
+  get "/" do
+    send_resp(conn, 200, "Hello, World!")
+  end
+
+  post "/" do
+    # When we receive an HTTP POST request we want to print out the
+    # JSON payload received for debugging purposes
+
+    {:ok, body, conn} = Plug.Conn.read_body(conn, length: 10_000_000)
+    IO.inspect(Jason.decode(body), label: "body")
+
+    conn
+    |> put_resp_header("content-type", "application/json")
+    |> send_resp(
+      200,
+      Jason.encode!(%{
+        "messages" => [%{id: UUID.uuid4()}]
+      })
+    )
+  end
+
+  match _ do
+    send_resp(conn, 404, "not found")
+  end
+end
+
+bandit = {Bandit, plug: Router, scheme: :http, port: 4001}
+{:ok, _} = Supervisor.start_link([bandit], strategy: :one_for_one)
+```
+
+Now follow the instructions at https://pinggy.io/ to expose this port on the public internet with SSH:
+
+```bash
+ssh -p 443 -R0:localhost:4001 qr@a.pinggy.io
+```
+
+<!-- livebook:{"break_markdown":true} -->
+
+This will display a QR code in your terminal and an HTTP link which when opened sets up the tunnel.
+
+For me it generated `https://rndaz-104-28-217-139.a.free.pinggy.link/`. Open this site and click the "Enter site" button and if successful, this will display `Hello, World!` from the Bandit server above.
+
+Store the generated link above in a Livebook secret called `CHANNEL_URL`.
+
+Next, sign-up for Turn and create a test sandbox account, you don't need to set-up a production number or go through Meta's self-signup processes.
+
+Navigate to the `Settings` section and then `API & Webhook` and generate a new authentication token and store that in a livebook secret called `TURN_TOKEN`.
+
+Next, we'll make the HTTP API call to create the Channel for this challenge.
+
+We'll instruct the channel to deliver any outbound messages to the Pinggy URL generated for us which points at our Bandit server running in this livebook.
+
+> **NOTE** The link generated by the pinggy service is only valid for 1 hour. You'll need to reconnect after 1 hour and it will generate a new link for you. If that happens you can update the Channel webhook URL in the Turn UI under `Settings`, `API & Webhooks` and then selecting the (old) pinggy URL in the list at the bottom of the page and updating it to have the new URL.
+
+```elixir
+turn_token = System.get_env("LB_TURN_TOKEN")
+channel_url = System.get_env("LB_CHANNEL_URL")
+
+client =
+  Tesla.client([
+    {Tesla.Middleware.BaseUrl, "https://whatsapp.turn.io/"},
+    {Tesla.Middleware.Headers, [{
+      "authorization", "Bearer #{turn_token}"
+    }]},
+    Tesla.Middleware.JSON
+  ])
+
+{:ok, %Tesla.Env{status: 200, body: %{
+  "number" => %{
+    "uuid" => created_channel_uuid
+  }
+}}} = Tesla.post(client, "/v1/numbers", %{
+  "backend_type" => "channel",
+  "number_type" => "channel_http_api",
+  "from_addr" => "my-challenge-channel",
+  "name" => "The Challenge Channel",
+  "endpoint" => channel_url
+})
+
+# If the channel has already been created and you get errors here, find the `uuid` in the Turn UI's
+# address bar when you select the channel from the numbers menu.
+# created_channel_uuid = "<and-then-comment-out-above-and-paste-it-here>"
+IO.inspect(created_channel_uuid, label: "Channel UUID")
+```
+
+Now that we've created the channel, we'll need to create a new token that can be used for messaging over it.
+
+Return to the Turn UI, and if necessary, reload the UI, to have the Channel show up in the top left number list. Select it, go to the `Settings` section as before and generate a new token that's bespoke for this Channel and save it in Livebook as a secret called `CHANNEL_TOKEN`.
+
+Next we'll be using the Journeys API to create a Journey. Create a new Tesla client and use it to upload the sample Journey we created at the start of the Livebook.
+
+````elixir
+channel_token = System.get_env("LB_CHANNEL_TOKEN")
+
+channel_client =
+  Tesla.client([
+    {Tesla.Middleware.BaseUrl, "https://whatsapp.turn.io/"},
+    {Tesla.Middleware.Headers,
+     [
+       {
+         "authorization",
+         "Bearer #{channel_token}"
+       }
+     ]},
+    Tesla.Middleware.JSON
+  ])
+
+{:ok, %Tesla.Env{status: 201, body: %{"uuid" => journey_uuid}}} =
+  Tesla.post(channel_client, "/v1/stacks", %{
+    "name" => "My Code Challenge Journey",
+    "publish_latest_changes" => true,
+    "enabled" => true,
+    "notebook" => """
+
+    # This is my Journey
+
+    ```stack
+    #{formatted_code}
+    ```
+    """
+  })
+
+# If the journey has already been created and you get errors here, find the `uuid` in the Turn UI's
+# address bar when you open the Journey
+# journey_uuid = "<and-then-comment-out-above-and-paste-it-here>"
+IO.inspect(journey_uuid, label: "Journey UUID")
+````
+
+Now reload the UI in Turn and your Journey should be published there. Opening it will load it as a Code Journey notebook and the simulator on the right should show you `hello world!`.
+
+### Update the Journey with a Trigger
+
+Triggers are defined in the DSL as well and those determine under what conditions a Journey should start, the following trigger instructs a Journey to respond to inbound messages that have the phrase `hi` in it:
+
+<!-- livebook:{"force_markdown":true} -->
+
+```elixir
+trigger(on: "MESSAGE RECEIVED") when has_phrase(event.message.text.body, "hi")
+```
+
+Add that to the Journey DSL and patch the Journey with the new notebook:
+
+````elixir
+updated_journey_notebook = """
+
+# This is my Journey
+
+Here is how it is triggered with the `"hi"` keyword.
+
+```stack
+trigger(on: "MESSAGE RECEIVED") when has_phrase(event.message.text.body, "hi")
+```
+
+Here is what it does when triggered
+
+```stack
+card MyCard do
+  text("hello world!")
+end
+```
+
+"""
+
+{:ok, %Tesla.Env{status: 200}} =
+  Tesla.patch(channel_client, "/v1/stacks/#{journey_uuid}", %{
+    "name" => "My Code Challenge Journey",
+    "publish_latest_changes" => true,
+    "enabled" => true,
+    "notebook" => updated_journey_notebook
+  })
+````
+
+### Starting the Journey via an HTTP call
+
+Now this journey has been created for the channel and should result in `"hello world"` being sent to the Channel when we send an inbound message with the word `hi`.
+
+Let's do that and confirm that Bandit has received this message:
+
+```elixir
+{:ok, %Tesla.Env{status: 200}} =
+  Tesla.post(channel_client, "/v1/numbers/#{created_channel_uuid}/messages", %{
+    "contact" => %{
+      "id" => "the-user-id",
+      "profile" => %{
+        "name" => "the-user-name"
+      }
+    },
+    "message" => %{
+      "type" => "text",
+      "text" => %{
+        "body" => "hi"
+      },
+      "from" => "the-user-id",
+      "id" => UUID.uuid4(),
+      "timestamp" => to_string(DateTime.to_unix(DateTime.utc_now()))
+    }
+  })
+```
+
+Now, if the Pinggy URL was correct Turn will have sent a Channel API payload to Bandit and that will have logged above.
+
+To confirm that this happened correctly, check the Bandit log output and confirm the presence of the following:
+
+<!-- livebook:{"force_markdown":true} -->
+
+```elixir
+%{
+  ...
+  "to" => "the-user-id",
+  "turn" => %{"text" => %{"body" => "hello world!"}, "type" => "text"}
+  ...
+}
+```
+
+This confirms the following setup is correct and working! 🎉
+
+What this means is that:
+
+1. We've created a channel in Turn to allow us to communicate with via HTTP
+2. We've setup a simple HTTP server with Bandit which accepts outbound messages _from_ Turn
+3. We've configured a Journey to respond to inbound messages with the keyword `hi` and the response message is sent back to Bandit via HTTP
+
+### A more complex Journey
+
+Here's an example of a Journey that uses quick reply buttons for a two step interaction. Presenting a card with buttons as quick replies (of which there can be a maximum of 3) and a card that responds to the button presses:
+
+<!-- livebook:{"force_markdown":true} -->
+
+```elixir
+card Card do
+  var =
+    buttons(Destination: "🧁", Destination: "🎂", Destination: "🍰") do
+      text("Choose your favourite cake!")
+    end
+end
+
+card Destination do
+  text("You chose @var using @var.label ")
+end
+```
+
+Let's update the Journey to use that!
+
+````elixir
+updated_journey_notebook = """
+
+# This is my Journey
+
+Here is how it is triggered with the `"hi"` keyword.
+
+```stack
+trigger(on: "MESSAGE RECEIVED") when has_phrase(event.message.text.body, "hi")
+```
+
+Here is what it does when triggered
+
+```stack
+card Card do
+  var =
+    buttons(Destination: "🧁", Destination: "🎂", Destination: "🍰") do
+      text("Choose your favourite cake!")
+    end
+end
+
+card Destination do
+  text("You chose @var using @var.label ")
+end
+```
+
+"""
+
+{:ok, %Tesla.Env{status: 200}} =
+  Tesla.patch(channel_client, "/v1/stacks/#{journey_uuid}", %{
+    "name" => "My Code Challenge Journey",
+    "publish_latest_changes" => true,
+    "enabled" => true,
+    "notebook" => updated_journey_notebook
+  })
+````
+
+Now when we send `hi` again, it submits a different payload to Bandit with the following printed in the logs:
+
+<!-- livebook:{"force_markdown":true} -->
+
+```elixir
+%{
+  ...
+  "to" => "the-user-id",
+  "turn" => %{
+     "interactive" => %{
+       "action" => %{
+       "buttons" => [
+          %{
+            "reply" => %{"id" => "8J+ngQ==", "title" => "🧁"},
+             "type" => "reply"
+           }
+           ...
+       ]}
+    }
+  }
+  ...
+}
+```
+
+```elixir
+{:ok, %Tesla.Env{status: 200}} =
+  Tesla.post(channel_client, "/v1/numbers/#{created_channel_uuid}/messages", %{
+    "contact" => %{
+      "id" => "the-user-id",
+      "profile" => %{
+        "name" => "the-user-name"
+      }
+    },
+    "message" => %{
+      "type" => "text",
+      "text" => %{
+        "body" => "hi"
+      },
+      "from" => "the-user-id",
+      "id" => UUID.uuid4(),
+      "timestamp" => to_string(DateTime.to_unix(DateTime.utc_now()))
+    }
+  })
+```
+
+From the [Channels API]()https://whatsapp.turn.io/docs/api/channel_api documentation the following payload submits a button press back to Turn. Let's submit that and observe the follow-up response in Bandit:
+
+```elixir
+payload = %{
+  "message" => %{
+    "from" => "the-user-id",
+    "id" => UUID.uuid4(),
+    "type" => "interactive",
+    "interactive" => %{
+      "type" => "button_reply",
+      "button_reply" => %{
+        "id" => "8J+ngQ==",
+        "title" => "🧁"
+      }
+    },
+    "timestamp" => to_string(DateTime.to_unix(DateTime.utc_now()))
+  },
+  "contact" => %{
+    "id" => "the-user-id",
+    "profile" => %{
+      "name" => "Bob Johnson"
+    }
+  }
+}
+
+{:ok, %Tesla.Env{status: 200}} =
+  Tesla.post(channel_client, "/v1/numbers/#{created_channel_uuid}/messages", payload)
+```
+
+Now you'll notice in the Bandit logs the following output:
+
+<!-- livebook:{"force_markdown":true} -->
+
+```elixir
+%{
+  ...
+  "to" => "the-user-id",
+  "turn" => %{
+    "text" => %{"body" => "You chose destination using 🧁"},
+    "type" => "text"
+  }
+  ...
+}
+```
+
+Which confirms the Journey completed the steps through the two cards. Our first message `hi` started the Journey which submitted first card posing a question with quick reply buttons. The second message replied with the ID and text of the first quick reply button and that had Turn submit the response `"You chose destination using 🧁"` back to Bandit.
+
+### Your Challenge!
+
+Your goal is to enhance and extend the monitoring service we built above. While the current implementation allows for basic smoke testing, there are several areas that need improvement for it to be truly robust, production-ready, and insightful.
+
+At a **minimum**, your submission should include:
+
+1. A working service that monitors Turn.io's Journeys performance
+
+   * The service should successfully send and receive messages from the Journey.
+   * It should track and log response times.
+   * It should handle at least one failure scenario gracefully (e.g., a missing or malformed response).
+
+2. Error handling and resiliency improvements
+
+   * Implement basic error handling for failed HTTP requests.
+   * Ensure unexpected payloads are logged and do not crash the service.
+
+c. Introduce basic retries for transient failures.
+
+1. Performance tracking
+
+   * Measure the latency of responses from Turn.io.
+   * Log latency data in a structured way.
+
+2. Documentation
+
+   * Describe your approach and the improvements you implemented.
+   * If you made trade-offs due to time constraints, explain what you would do differently in a real-world scenario.
+
+It's entirely up to you if you use a Livebook, a hosted service, or something else, the only requirement is that it must be written in Elixir.
+
+### Bonus Questions for Discussion
+
+Also, consider answering some of these questions in your submission:
+
+1. We want to be informed when the latency of the response is above a configurable threshold, how would we go about that for a proof of concept implementation?
+2. In production our monitoring stack consists of Prometheus, Grafana, and PagerDuty. When moving from a proof of concept stage to a production monitoring setup, what would be the steps involved?
+3. The Journeys DSL has far more concepts available to end-users which allow for more complex interactions, including calling HTTP webhooks, sending and receiving of media, and list buttons. How would you design a journey to test these? How would you handle partial failures and escalate those kinds of problems?
+4. AI is taking the world by storm and the Journey DSL has AI assistant specific functions available to it. How would you integrate that into a service like this? How would you use it to handle media such as audio and images? How would you use it to handle variations in text inputs and responses?
+5. How would you write tests for a service like this?
+6. How would you set a service like this to run automatically in the background on an interval or in response to a new release? What would be important things to look at and consider?
+7. We've entirely ignored any kind of security considerations, what would you recommend be put in place before running something like this in a production environment?
+
+### Time Expectations
+
+* A basic solution should take **3-4 hours** to implement.
+* If you want to explore advanced concepts, feel free to spend more time, **but we don't expect more than 6 hours total**.
+* Your submission will primarily be evaluated on correctness, design decisions, and your thought process rather than completion of every possible feature.
+
+### How to Submit
+
+Once you're satisfied with your solution, please send the following to neelke@turn.io:
+
+1. Your code (GitHub repo or zipped project)
+2. Your documentation (approach, decisions, and answers to any additional questions you chose to explore)
