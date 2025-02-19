@@ -17,6 +17,7 @@ Thanks for wanting to take this challenge as part of our interview process! The 
 
 This isn't necessarily reflective of the work one would end up doing but does help us have a conversation about how you go about approaching work!
 
+[![Run in Livebook](https://livebook.dev/badge/v1/blue.svg)](https://livebook.dev/run?url=https%3A%2F%2Fraw.githubusercontent.com%2Fturnhub%2Fchallenges%2Frefs%2Fheads%2Fmain%2Fengineering-challenge.livemd)
 ### The situation
 
 We run a platform for powering life improving conversations at Turn.io. This is being used by hundreds of impact organisations, social enterprises, and ministries of health in emerging markets.
